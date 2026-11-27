@@ -7,9 +7,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # Optimisé pour la taille : modules compilés ensemble, code inutilisé et symboles retirés
 xcrun swiftc -parse-as-library -Osize -wmo -Xlinker -dead_strip -swift-version 5 -target "$(uname -m)-apple-macos14.0" \
-  app/App.swift app/Model.swift app/Stats.swift app/Circuit.swift -o "$APP/Contents/MacOS/VPNRotation"
+  app/App.swift app/Model.swift app/Stats.swift app/Circuit.swift app/WorldMap.swift -o "$APP/Contents/MacOS/VPNRotation"
 xcrun strip -rSTx "$APP/Contents/MacOS/VPNRotation" 2>/dev/null
-cp app/AppIcon.icns "$APP/Contents/Resources/"
+cp app/AppIcon.icns app/countries.bin "$APP/Contents/Resources/"
 cp app/install.sh app/control.sh app/rotate.sh app/net.sh app/stats.sh "$APP/Contents/Resources/"
 
 # WireGuard est embarqué : rien à installer sur le Mac qui reçoit l'application
@@ -47,7 +47,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
   <key>CFBundleIdentifier</key><string>local.vpnrotate.app</string>
   <key>CFBundleExecutable</key><string>VPNRotation</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>2.0</string>
+  <key>CFBundleShortVersionString</key><string>2.1</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
 </dict>
 </plist>

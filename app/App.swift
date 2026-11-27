@@ -1,5 +1,5 @@
 import SwiftUI
-import MapKit
+import CoreLocation
 import Charts
 import Combine
 import UniformTypeIdentifiers
@@ -126,28 +126,6 @@ extension CLLocationCoordinate2D {
     }
 }
 
-extension MKCoordinateRegion {
-    /// Cadre un point, ou deux avec une marge autour
-    init(showing point: CLLocationCoordinate2D, and other: CLLocationCoordinate2D?) {
-        guard let other else {
-            self.init(center: point, span: MKCoordinateSpan(latitudeDelta: 24, longitudeDelta: 36))
-            return
-        }
-        // Le plus court chemin peut passer par l'antiméridien
-        var east = other.longitude - point.longitude
-        if east > 180 { east -= 360 }
-        if east < -180 { east += 360 }
-        var longitude = point.longitude + east / 2
-        if longitude > 180 { longitude -= 360 }
-        if longitude < -180 { longitude += 360 }
-        let latitude = (point.latitude + other.latitude) / 2
-        self.init(center: CLLocationCoordinate2D(latitude: min(65, max(-65, latitude)), longitude: longitude),
-                  span: MKCoordinateSpan(
-                    latitudeDelta: min(110, max(16, abs(other.latitude - point.latitude) * 1.7)),
-                    longitudeDelta: min(300, max(24, abs(east) * 1.5))))
-    }
-}
-
 /// Repère de la position actuelle, avec une onde quand le VPN protège
 struct MapPin: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -242,7 +220,7 @@ struct HomeDot: View {
 struct DashboardView: View {
     @EnvironmentObject var model: Model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @StateObject private var camera = Box(MapCameraPosition.automatic)
+    @StateObject private var map = WorldMapController()
     @StateObject private var selection = Box<Int?>(nil)
     @AppStorage("showCircuit") private var showCircuit = false
     let showServers: () -> Void
@@ -269,37 +247,39 @@ struct DashboardView: View {
         selection.value.flatMap { id in model.circuit.first { $0.id == id }?.name } ?? model.currentName
     }
 
+    /// Pays de sortie du serveur connecté : celui de l'adresse relevée, sinon celui du nom
+    private var connectedCountry: String? {
+        guard model.state == .connected else { return nil }
+        let named = model.currentName.flatMap(countryCode)
+        return (located ? model.ip?.country?.uppercased() : nil) ?? named
+    }
+
     var body: some View {
         let circuit = circuit
-        return Map(position: $camera.value) {
+        let circuitMap = CircuitMap(circuit: circuit, highlighted: highlighted, current: model.currentName) { place in
+            // Plusieurs clics sur un même repère font défiler ses passages
+            let numbers = place.numbers
+            let next = selection.value.flatMap { numbers.firstIndex(of: $0) }.map { $0 - 1 }
+            selection.value = numbers[next.map { $0 < 0 ? numbers.count - 1 : $0 } ?? numbers.count - 1]
+        }
+        let home = home, coordinate = coordinate
+        let link = home.flatMap { home in coordinate.map { [home, $0] } }
+        let lines = showCircuit ? circuitMap.lines
+            : link.map { [MapLine(id: "home", points: $0, color: VPNState.connected.color, width: 3, dash: [2, 8])] } ?? []
+        return WorldMap(controller: map, highlight: connectedCountry, lines: lines) { project in
             if showCircuit {
-                CircuitMap(circuit: circuit, highlighted: highlighted, current: model.currentName) { place in
-                    // Plusieurs clics sur un même repère font défiler ses passages
-                    let numbers = place.numbers
-                    let next = selection.value.flatMap { numbers.firstIndex(of: $0) }.map { $0 - 1 }
-                    selection.value = numbers[next.map { $0 < 0 ? numbers.count - 1 : $0 } ?? numbers.count - 1]
-                }
+                circuitMap.markers(project)
             } else {
-                if let home, let coordinate {
-                    MapPolyline(coordinates: [home, coordinate], contourStyle: .geodesic)
-                        .stroke(VPNState.connected.color,
-                                style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: [2, 8]))
-                    Annotation("Votre position", coordinate: home) { HomeDot() }
-                        .annotationTitles(.hidden)
-                }
+                if let home { HomeDot().mapMarker(at: home, project) }
                 if let coordinate {
-                    Annotation(pinTitle, coordinate: coordinate, anchor: .bottom) {
-                        MapPin(state: model.state, locating: !located, title: pinTitle, detail: pinDetail)
-                    }
-                    .annotationTitles(.hidden)
+                    MapPin(state: model.state, locating: !located, title: pinTitle, detail: pinDetail)
+                        .mapMarker(at: coordinate, project, bottom: true)
                 }
             }
         }
-        .mapStyle(.standard(elevation: .flat, emphasis: .muted, pointsOfInterest: .excludingAll))
-        .mapControls {
-            MapCompass()
-            MapZoomStepper()
-        }
+        // Carte sombre et sobre, où le pays surligné ressort ; les cartes posées
+        // dessus gardent l'apparence du système
+        .environment(\.colorScheme, .dark)
         // Les cartes réservent leur place : le repère reste centré dans la zone libre
         .safeAreaInset(edge: .top, spacing: 0) { statusCard.padding(14) }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -359,14 +339,9 @@ struct DashboardView: View {
     private func recenter() {
         let chosen = selection.value.flatMap { id in model.circuit.first { $0.id == id }?.name }
         let target = showCircuit ? circuit.region(highlighting: chosen)
-            : coordinate.map { MKCoordinateRegion(showing: $0, and: home) }
+            : coordinate.map { MapRegion(showing: $0, and: home) }
         guard let target else { return }
-        let position = MapCameraPosition.region(target)
-        if reduceMotion {
-            camera.value = position
-        } else {
-            withAnimation(.smooth(duration: 1.2)) { camera.value = position }
-        }
+        map.show(target, animated: !reduceMotion)
     }
 
     private var recenterButton: some View {

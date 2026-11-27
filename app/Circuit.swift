@@ -1,5 +1,5 @@
 import SwiftUI
-import MapKit
+import CoreLocation
 
 // MARK: - Trajet d'un serveur
 
@@ -184,21 +184,22 @@ struct Circuit {
     }
 
     /// Zone qui contient tout le circuit, ou le seul trajet du serveur choisi
-    func region(highlighting name: String?) -> MKCoordinateRegion? {
+    func region(highlighting name: String?) -> MapRegion? {
         let shown = name.flatMap { name in stops.first { $0.name == name } }.map { [$0] } ?? stops
         let points = shown.flatMap(path)
         guard let south = points.map(\.latitude).min(), let north = points.map(\.latitude).max(),
               let west = points.map(\.longitude).min(), let east = points.map(\.longitude).max()
         else { return nil }
-        return MKCoordinateRegion(
+        return MapRegion(
             center: CLLocationCoordinate2D(latitude: max(-65, min(65, (south + north) / 2)),
                                            longitude: (west + east) / 2),
-            span: MKCoordinateSpan(latitudeDelta: min(120, max(10, (north - south) * 1.5)),
-                                   longitudeDelta: min(340, max(16, (east - west) * 1.3))))
+            latitudeDelta: min(120, max(10, (north - south) * 1.5)),
+            longitudeDelta: min(340, max(16, (east - west) * 1.3)))
     }
 }
 
-struct CircuitMap: MapContent {
+/// Trajets et repères du circuit, posés sur la carte
+struct CircuitMap {
     let circuit: Circuit
     /// Serveur dont le trajet est mis en avant
     let highlighted: String?
@@ -206,32 +207,30 @@ struct CircuitMap: MapContent {
     let current: String?
     let select: (Place) -> Void
 
-    var body: some MapContent {
+    var lines: [MapLine] {
         // Le trajet mis en avant est tracé en dernier, au-dessus des autres
-        ForEach(circuit.stops.sorted { $0.name != highlighted && $1.name == highlighted }) { stop in
-            MapPolyline(coordinates: circuit.path(to: stop), contourStyle: .geodesic)
-                .stroke(color(stop.name).opacity(highlighted == nil ? 0.8 : stop.name == highlighted ? 1 : 0.3),
-                        style: StrokeStyle(lineWidth: stop.name == highlighted ? 4 : 2, lineCap: .round,
-                                           lineJoin: .round,
-                                           dash: stop.name == highlighted ? [] : [3, 6]))
+        circuit.stops.sorted { $0.name != highlighted && $1.name == highlighted }.map { stop in
+            let on = stop.name == highlighted
+            return MapLine(id: stop.name, points: circuit.path(to: stop),
+                           color: color(stop.name).opacity(highlighted == nil ? 0.8 : on ? 1 : 0.3),
+                           width: on ? 4 : 2, dash: on ? [] : [3, 6])
         }
+    }
+
+    @ViewBuilder func markers(_ project: MapProjection) -> some View {
         if let home = circuit.home {
-            Annotation("Votre position", coordinate: home) { HomeDot() }
-                .annotationTitles(.hidden)
+            HomeDot().mapMarker(at: home, project)
         }
         ForEach(circuit.entries, id: \.self) { code in
             if let coordinate = countryCoordinate(code) {
-                Annotation("Entrée \(countryName(code))", coordinate: coordinate) { EntryDot(code: code) }
-                    .annotationTitles(.hidden)
+                EntryDot(code: code).mapMarker(at: coordinate, project)
             }
         }
         ForEach(circuit.places) { place in
-            Annotation(place.stops[0].name, coordinate: place.coordinate) {
-                StopMarker(place: place,
-                           color: color(place.stops.first { $0.name == current }?.name ?? ""),
-                           highlighted: place.stops.contains { $0.name == highlighted }) { select(place) }
-            }
-            .annotationTitles(.hidden)
+            StopMarker(place: place,
+                       color: color(place.stops.first { $0.name == current }?.name ?? ""),
+                       highlighted: place.stops.contains { $0.name == highlighted }) { select(place) }
+                .mapMarker(at: place.coordinate, project)
         }
     }
 

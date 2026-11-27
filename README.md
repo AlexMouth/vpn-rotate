@@ -36,3 +36,5 @@ brew install wireguard-tools bash
 ## Composants tiers
 
 L'archive téléchargeable embarque [wireguard-tools](https://git.zx2c4.com/wireguard-tools/) (GPL-2.0), [wireguard-go](https://git.zx2c4.com/wireguard-go/) (MIT), [GNU bash](https://www.gnu.org/software/bash/) et readline (GPL-3.0), ncurses (MIT) et gettext/libintl (LGPL-2.1), tels que distribués par Homebrew. Leurs sources sont disponibles aux adresses des projets.
+
+Les contours des pays de la carte viennent de [Natural Earth](https://www.naturalearthdata.com/) (domaine public), simplifiés par `app/countries.py`.
