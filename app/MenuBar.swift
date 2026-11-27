@@ -20,9 +20,17 @@ struct MenuBarLabel: View {
 /// Menu natif : état, changement de serveur, arrêt et ouverture de la fenêtre
 struct MenuBarMenu: View {
     @ObservedObject var model: Model
+    @ObservedObject var updater: Updater
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        if let release = updater.available {
+            Button("Installer la mise à jour \(release.version) et relancer") {
+                Task { await updater.install(release) }
+            }
+            Divider()
+        }
+
         Text(headline)
         if let ip = model.ip {
             Text("IP \(ip.ip)" + ([ip.city, ip.country].compactMap { $0 }.isEmpty ? ""

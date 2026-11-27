@@ -4,14 +4,15 @@ private let env = ProcessInfo.processInfo.environment
 private let root = env["VPNROTATE_TEST_ROOT"] ?? ""
 /// Dossier réservé à l'administrateur, rempli par install.sh
 let helperPath = root + "/Library/PrivilegedHelperTools/local.vpnrotate"
-/// L'ancien emplacement reste lu tant que la mise à jour n'est pas installée
+/// Nom de l'installation jusqu'à la version 2.4 : encore lue tant que install.sh ne l'a pas reprise
+private let legacyName = "local.protonvpn.rotation"
+private var migrated: Bool { FileManager.default.fileExists(atPath: helperPath) }
 var sharePath: String {
-    FileManager.default.fileExists(atPath: helperPath + "/share")
-        ? helperPath + "/share" : root + "/usr/local/share/vpnrotate"
+    migrated ? helperPath + "/share" : root + "/Library/PrivilegedHelperTools/\(legacyName)/share"
 }
-let logPath = root + "/var/log/vpnrotate.log"
-let plistPath = root + "/Library/LaunchDaemons/local.vpnrotate.plist"
-let statsPlistPath = root + "/Library/LaunchDaemons/local.vpnrotate.stats.plist"
+var logPath: String { root + (migrated ? "/var/log/vpnrotate.log" : "/var/log/protonvpn-rotation.log") }
+var plistPath: String { root + "/Library/LaunchDaemons/\(migrated ? "local.vpnrotate" : legacyName).plist" }
+var statsPlistPath: String { root + "/Library/LaunchDaemons/\(migrated ? "local.vpnrotate" : legacyName).stats.plist" }
 
 struct Server: Codable, Identifiable, Equatable {
     var id = UUID()

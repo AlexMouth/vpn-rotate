@@ -55,9 +55,7 @@ extension View {
     func floatingCard() -> some View {
         padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.primary.opacity(0.08)))
-            .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
+            .glassPanel(RoundedRectangle(cornerRadius: 16, style: .continuous), shadow: 14)
     }
 }
 
@@ -291,11 +289,11 @@ struct DashboardView: View {
                     }
                     .pickerStyle(.segmented).labelsHidden().fixedSize()
                     .padding(4)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .shadow(color: .black.opacity(0.18), radius: 6, y: 3)
+                    .glassPanel(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     Spacer()
                     if showCircuit || coordinate != nil { recenterButton }
                 }
+                .glassGroup()
                 if showCircuit {
                     CircuitCard(circuit: circuit, running: model.installed, current: model.currentName,
                                 selection: $selection.value)
@@ -349,9 +347,7 @@ struct DashboardView: View {
             Image(systemName: "scope")
                 .font(.system(size: 15, weight: .semibold))
                 .frame(width: 34, height: 34)
-                .background(.regularMaterial, in: Circle())
-                .overlay(Circle().strokeBorder(.primary.opacity(0.08)))
-                .shadow(color: .black.opacity(0.18), radius: 6, y: 3)
+                .glassPanel(Circle(), interactive: true)
                 .contentShape(Circle())
         }
         .buttonStyle(PressableStyle())
@@ -418,7 +414,7 @@ struct DashboardView: View {
         HStack(spacing: 10) {
             if model.installed {
                 Button { model.changeNow() } label: { Label("Serveur suivant", systemImage: "forward.fill") }
-                    .buttonStyle(.borderedProminent)
+                    .glassProminentButton()
                     .keyboardShortcut("r")
                     .help("Changer de serveur maintenant (⌘R)")
                 if !model.pending && !model.activeNames.isEmpty {
@@ -435,16 +431,17 @@ struct DashboardView: View {
                 }
                 Spacer()
                 Button(role: .destructive) { model.stop() } label: { Label("Arrêter", systemImage: "stop.fill") }
+                    .glassButton()
                     .help("Arrêter la rotation et couper le VPN")
             } else if model.enabledCount >= 2 {
                 Button { model.apply() } label: { Label("Démarrer la rotation", systemImage: "play.fill") }
-                    .buttonStyle(.borderedProminent)
+                    .glassProminentButton()
                     .disabled(!model.canApply)
                 Text("\(model.enabledCount) serveurs · toutes les \(model.library.minutes) min. Quittez d'abord toute autre application VPN.")
                     .font(.callout).foregroundStyle(.secondary)
             } else {
                 Button(action: showServers) { Label("Ajouter des serveurs", systemImage: "plus") }
-                    .buttonStyle(.borderedProminent)
+                    .glassProminentButton()
                 Text("Cochez au moins 2 serveurs pour démarrer la rotation.")
                     .font(.callout).foregroundStyle(.secondary)
             }
@@ -616,7 +613,7 @@ struct ServersView: View {
                 ContentUnavailableView {
                     Label("Aucun serveur", systemImage: "square.and.arrow.down")
                 } description: {
-                    Text("Glissez vos fichiers WireGuard .conf ici, ou choisissez-les.")
+                    Text("Glissez ici les fichiers WireGuard .conf de votre fournisseur VPN, ou choisissez-les.")
                 } actions: {
                     Button("Ajouter des fichiers .conf", action: add).buttonStyle(.borderedProminent)
                 }
@@ -648,7 +645,6 @@ struct ServersView: View {
                 Menu {
                     Button("Tout cocher") { setAll(true) }
                     Button("Tout décocher") { setAll(false) }
-                    Divider()
                 } label: { Label("Options", systemImage: "ellipsis.circle") }
                 Button(action: add) { Label("Ajouter", systemImage: "plus") }
                     .help("Ajouter des fichiers .conf (⌘O)")
@@ -825,6 +821,8 @@ struct SettingsPage: View {
     @AppStorage(Notifier.alertsKey) private var notifyAlerts = true
     @AppStorage(Notifier.changesKey) private var notifyChanges = false
     @AppStorage(MenuBarSetting.key) private var menuBar = true
+    @EnvironmentObject var updater: Updater
+    @AppStorage(Updater.autoKey) private var autoUpdate = true
     private let presets = [5, 10, 15, 30, 60, 120]
 
     private var minutes: Binding<Int> {
@@ -840,6 +838,7 @@ struct SettingsPage: View {
                 killSwitch
                 notifications
                 menuBarCard
+                updates
                 wireGuard
                 uninstall
             }
@@ -990,6 +989,78 @@ struct SettingsPage: View {
                 }
             }
             .toggleStyle(.switch)
+        }
+    }
+
+    private var updates: some View {
+        let release: Release? = switch updater.phase {
+        case .available(let r), .installing(let r, _): r
+        default: nil
+        }
+        return SettingsCard(symbol: "arrow.down.circle.fill", color: .teal, title: "Mises à jour",
+                            subtitle: "Version installée : \(updater.current). Les nouvelles versions viennent des Releases GitHub du projet.") {
+            HStack(spacing: 8) {
+                updateStatus
+                Spacer()
+                if updater.busy { ProgressView().controlSize(.small) }
+                Button("Rechercher") { Task { await updater.check() } }
+                    .disabled(updater.busy)
+            }
+            if let release {
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Nouveautés de la version \(release.version)").font(.callout.weight(.semibold))
+                    if !release.notes.isEmpty {
+                        ScrollView {
+                            Text(release.notes).font(.caption).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        .frame(maxHeight: 120)
+                    }
+                    HStack {
+                        Link("Voir sur GitHub", destination: release.page).font(.callout)
+                        Spacer()
+                        Button("Installer et relancer") { Task { await updater.install(release) } }
+                            .glassProminentButton()
+                            .disabled(updater.busy)
+                    }
+                    Text("La rotation continue pendant la mise à jour. Le mot de passe administrateur peut être demandé au prochain démarrage de la rotation.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Divider()
+            Toggle(isOn: $autoUpdate) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Rechercher automatiquement")
+                    Text("Une fois par jour, tant que VPN Rotate est ouverte. Rien n'est installé sans votre accord.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+        }
+    }
+
+    @ViewBuilder private var updateStatus: some View {
+        switch updater.phase {
+        case .idle:
+            Text("Pas encore vérifié").foregroundStyle(.secondary)
+        case .checking:
+            Text("Recherche…").foregroundStyle(.secondary)
+        case .upToDate:
+            Label("VPN Rotate est à jour", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case .available(let r):
+            Label("Version \(r.version) disponible", systemImage: "sparkles")
+                .foregroundStyle(.teal)
+        case .installing(_, let step):
+            Text(step).foregroundStyle(.secondary)
+        case .failed(let message):
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -1343,14 +1414,27 @@ struct RotationApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     /// Un seul modèle pour la fenêtre et la barre des menus : il vit tant que l'application tourne
     @StateObject private var model = Model()
+    @StateObject private var updater = Updater()
     @AppStorage(MenuBarSetting.key) private var menuBar = true
 
+    init() { Self.migrateDefaults() }
+
+    /// Reprend une seule fois les réglages enregistrés sous l'identifiant utilisé jusqu'à la version 2.4
+    private static func migrateDefaults() {
+        let legacy = "local.protonvpn.rotation.app", defaults = UserDefaults.standard
+        guard let old = defaults.persistentDomain(forName: legacy) else { return }
+        for (key, value) in old where defaults.object(forKey: key) == nil {
+            defaults.set(value, forKey: key)
+        }
+        defaults.removePersistentDomain(forName: legacy)
+    }
+
     var body: some Scene {
-        Window("VPN Rotate", id: "main") { RootView(model: model) }
+        Window("VPN Rotate", id: "main") { RootView(model: model).environmentObject(updater) }
             .windowResizability(.contentMinSize)
             .defaultSize(width: 980, height: 720)
         MenuBarExtra(isInserted: $menuBar) {
-            MenuBarMenu(model: model)
+            MenuBarMenu(model: model, updater: updater)
         } label: {
             MenuBarLabel(model: model)
         }

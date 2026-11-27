@@ -20,9 +20,9 @@ PLIST="$ROOT/Library/LaunchDaemons/local.vpnrotate.plist"
 STATSPLIST="$ROOT/Library/LaunchDaemons/local.vpnrotate.stats.plist"
 LOG="$ROOT/var/log/vpnrotate.log"
 RUN="$ROOT/var/run/wireguard"
-OLD_DIR="$ROOT/usr/local/etc/vpnrotate"
-OLD_SHARE="$ROOT/usr/local/share/vpnrotate"
-OLD_BIN="$ROOT/usr/local/libexec"
+# Nom de l'installation jusqu'à la version 2.4, repris puis retiré ci-dessous
+OLD_NAME="local.protonvpn.rotation"
+OLD_H="$ROOT/Library/PrivilegedHelperTools/$OLD_NAME"
 
 die() { echo "$1" >&2; exit 1; }
 
@@ -53,24 +53,19 @@ put "$HERE/stats.sh" "$H/stats.sh" 755
 put "$HERE/rotate.sh" "$H/rotate.sh" 755
 put "$HERE/control.sh" "$H/control.sh" 755
 
-# Ancienne installation (dans /usr/local) : on la coupe, reprend ses
-# statistiques et la retire
-if [ -d "$OLD_DIR" ] || [ -f "$OLD_BIN/vpnrotate-rotate.sh" ]; then
-  launchctl bootout system/local.vpnrotate 2>/dev/null || true
-  launchctl bootout system/local.vpnrotate.stats 2>/dev/null || true
-  # L'ancien dossier de données n'est utilisé que s'il appartient bien à root
-  old="$OLD_SHARE"
-  if [ -z "$ROOT" ] && { [ -L "$old" ] || [ "$(stat -f %u "$old" 2>/dev/null)" != 0 ]; }; then
-    old="$H/share"
-  fi
+# Installation sous l'ancien nom : on la coupe, reprend ses statistiques et
+# son jeton pf (le blocage hors VPN reste en place), puis on la retire
+if [ -d "$OLD_H" ] && [ ! -L "$OLD_H" ]; then
+  launchctl bootout "system/$OLD_NAME" 2>/dev/null || true
+  launchctl bootout "system/$OLD_NAME.stats" 2>/dev/null || true
   (
-    DIR="$OLD_DIR" SHARE="$old"
-    [ -n "$ROOT" ] || export PATH="$PATH:$H/bin"
+    DIR="$OLD_H/etc" SHARE="$OLD_H/share"
+    [ -n "$ROOT" ] || export PATH="$H/bin:$PATH"
     . "$H/net.sh"
     . "$H/stats.sh"
     record_stats || true
     # Retirer la prise de contrôle arrête le tunnel, comme "wg-quick down"
-    for f in "$RUN"/vpn[0-9][0-9].name; do
+    for f in "$RUN"/pvpn[0-9][0-9].name; do
       [ -f "$f" ] || continue
       iface="$(cat "$f")"
       if [[ "$iface" =~ ^utun[0-9]+$ ]]; then rm -f "$RUN/$iface.sock"; fi
@@ -80,22 +75,19 @@ if [ -d "$OLD_DIR" ] || [ -f "$OLD_BIN/vpnrotate-rotate.sh" ]; then
     unblock_ipv6 >> "$LOG" || true
     restore_dns >> "$LOG" || true
   )
-  if [ "$old" != "$H/share" ]; then
-    for name in stats.tsv history.tsv stats-since; do
-      [ -f "$old/$name" ] && [ ! -e "$H/share/$name" ] || continue
-      # Lu avec les droits du compte, jamais ceux de root
-      if [ -z "$ROOT" ]; then
-        sudo -u "#$uid" cat "$old/$name" > "$H/share/$name"
-      else
-        cat "$old/$name" > "$H/share/$name"
-      fi
-      chmod 644 "$H/share/$name"
-    done
+  for name in stats.tsv history.tsv stats-since; do
+    [ -f "$OLD_H/share/$name" ] && [ ! -L "$OLD_H/share/$name" ] && [ ! -e "$H/share/$name" ] || continue
+    cp -X "$OLD_H/share/$name" "$H/share/$name"
+    chmod 644 "$H/share/$name"
+  done
+  if [ -f "$OLD_H/pf-token" ] && [ ! -e "$H/pf-token" ]; then
+    cp -X "$OLD_H/pf-token" "$H/pf-token"
+    chmod 600 "$H/pf-token"
   fi
-  rm -f "$PLIST" "$STATSPLIST" "$OLD_BIN/vpnrotate-rotate.sh" \
-    "$OLD_BIN/vpnrotate-net.sh" "$OLD_BIN/vpnrotate-stats.sh"
+  rm -f "$ROOT/Library/LaunchDaemons/$OLD_NAME.plist" "$ROOT/Library/LaunchDaemons/$OLD_NAME.stats.plist" \
+    "$SUDOERS"/protonvpn-rotation-* "$ROOT/var/log/protonvpn-rotation.log"
   # Contient des copies des clés privées
-  rm -rf "${OLD_DIR:?}"
+  rm -rf "${OLD_H:?}"
 fi
 
 # En dernier, une fois tout en place ; contrôlé avant d'être activé

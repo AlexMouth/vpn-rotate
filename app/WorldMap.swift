@@ -392,9 +392,7 @@ struct WorldMap<Overlay: View>: View {
             Divider().frame(width: 20)
             zoomButton("minus", "Dézoomer", -1)
         }
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(.primary.opacity(0.1)))
-        .shadow(color: .black.opacity(0.25), radius: 5, y: 2)
+        .glassPanel(RoundedRectangle(cornerRadius: 9, style: .continuous), shadow: 5)
     }
 
     private func zoomButton(_ symbol: String, _ label: String, _ delta: Double) -> some View {
