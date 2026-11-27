@@ -6,6 +6,7 @@ Application macOS qui change automatiquement de serveur VPN (WireGuard, avec les
 - Carte du monde : position actuelle et circuit de la rotation
 - Débit en direct, statistiques par serveur et hors VPN
 - Blocage hors VPN (kill switch, pare-feu pf de macOS) : rien ne sort en clair pendant un changement de serveur ou si le tunnel tombe
+- Notifications : serveur injoignable, tunnel tombé, VPN rétabli, et en option chaque changement de serveur (tant que l'application est ouverte)
 - Réglages et journal
 
 ## Télécharger

@@ -822,6 +822,8 @@ struct ChoiceTile<Content: View>: View {
 struct SettingsPage: View {
     @EnvironmentObject var model: Model
     @StateObject private var confirmUninstall = Box(false)
+    @AppStorage(Notifier.alertsKey) private var notifyAlerts = true
+    @AppStorage(Notifier.changesKey) private var notifyChanges = false
     private let presets = [5, 10, 15, 30, 60, 120]
 
     private var minutes: Binding<Int> {
@@ -835,6 +837,7 @@ struct SettingsPage: View {
                 frequency
                 order
                 killSwitch
+                notifications
                 wireGuard
                 uninstall
             }
@@ -933,6 +936,41 @@ struct SettingsPage: View {
                 }
             }
             .toggleStyle(.switch)
+        }
+    }
+
+    private func notifyToggle(_ isOn: Binding<Bool>, _ title: String, _ detail: String) -> some View {
+        Toggle(isOn: Binding(get: { isOn.wrappedValue },
+                             set: { isOn.wrappedValue = $0; if $0 { model.enableNotifications() } })) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .toggleStyle(.switch)
+    }
+
+    private var notifications: some View {
+        SettingsCard(symbol: "bell.badge.fill", color: .red, title: "Notifications",
+                     subtitle: "Envoyées tant que VPN Rotate est ouverte, même en arrière-plan.") {
+            notifyToggle($notifyAlerts, "Alertes",
+                         "Serveur injoignable, plus aucun serveur disponible, tunnel tombé, VPN rétabli.")
+            Divider()
+            notifyToggle($notifyChanges, "Changements de serveur",
+                         "À chaque rotation, quand la fenêtre n'est pas au premier plan.")
+            if model.notificationsDenied && (notifyAlerts || notifyChanges) {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text("macOS bloque les notifications de VPN Rotate.").font(.callout)
+                    Spacer()
+                    Button("Ouvrir les réglages") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                }
+            }
         }
     }
 

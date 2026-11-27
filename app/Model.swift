@@ -207,6 +207,16 @@ final class Model: ObservableObject {
     let live = Live()
     @Published var busy = false
     @Published var message: String?
+    /// Notifications refusées dans les Réglages Système
+    @Published var notificationsDenied = false
+
+    let notifier = Notifier()
+    /// Taille du journal déjà lue : seules les lignes suivantes déclenchent une notification
+    private var logOffset: Int?
+    /// Plus aucun serveur joignable, jusqu'à la prochaine connexion
+    private var failed = false
+    private var downSince: Date?
+    private var downNotified = false
 
     private let folder: URL
     private var previous: (time: Date, interface: String?, bytes: [String: (UInt32, UInt32)])?
@@ -249,6 +259,12 @@ final class Model: ObservableObject {
         }
         refresh()
         startTicking()
+        if notifier.alerts || notifier.changes { enableNotifications() }
+    }
+
+    /// Demande l'autorisation de macOS et note si elle est refusée
+    func enableNotifications() {
+        notifier.authorize { [weak self] denied in self?.assign(\.notificationsDenied, denied) }
     }
 
     /// Le circuit placé sur la carte, recalculé seulement quand ses données changent
@@ -533,7 +549,86 @@ final class Model: ObservableObject {
             assign(\.log, Array(journal.split(separator: "\n").suffix(500).map(String.init)))
             // Tout le journal : les messages de WireGuard repoussent vite les connexions au-delà de 500 lignes
             assign(\.circuit, visits(inLog: journal))
+            scanLog(journal)
         }
+        watchTunnel()
+    }
+
+    // MARK: Notifications
+
+    /// Lit les lignes ajoutées au journal depuis la dernière fois. Au premier
+    /// passage et après un raccourcissement du journal, rien n'est notifié.
+    private func scanLog(_ journal: String) {
+        let size = journal.utf8.count
+        defer { logOffset = size }
+        guard let start = logOffset, size > start else { return }
+        let fresh = String(decoding: journal.utf8.dropFirst(start), as: UTF8.self)
+        for raw in fresh.split(separator: "\n") {
+            // Retire la date "AAAA-MM-JJ HH:MM:SS "
+            let chars = Array(raw.prefix(20))
+            let dated = chars.count == 20 && chars[4] == "-" && chars[10] == " " && chars[13] == ":"
+            notify(forLogLine: dated ? String(raw.dropFirst(20)) : String(raw))
+        }
+    }
+
+    private func notify(forLogLine line: String) {
+        let alerts = notifier.alerts
+        if line.hasPrefix("connecté : ") {
+            let name = String(line.dropFirst("connecté : ".count))
+            if failed || downNotified {
+                if alerts { notifier.post("VPN rétabli", "Connecté à \(name).", id: "state") }
+            } else if notifier.changes, !NSApp.isActive {
+                notifier.post("Nouveau serveur", name, id: "state")
+            }
+            failed = false
+            downNotified = false
+            downSince = nil
+        } else if line.hasPrefix("serveur injoignable : ") {
+            let name = String(line.dropFirst("serveur injoignable : ".count))
+            if alerts {
+                notifier.post("Serveur injoignable", "\(name) ne répond pas : passage au serveur suivant.",
+                              id: "unreachable-\(name)")
+            }
+        } else if line.hasPrefix("ÉCHEC : aucun serveur joignable") {
+            failed = true
+            if alerts {
+                notifier.post("Aucun serveur joignable",
+                              line.contains("trafic bloqué")
+                                  ? "Internet est bloqué pour protéger votre adresse. Vérifiez votre connexion ou arrêtez la rotation."
+                                  : "Le VPN est coupé : votre vraie adresse est visible.",
+                              id: "state", sound: true)
+            }
+        } else if line.hasPrefix("ÉCHEC : ") {
+            let detail = String(line.dropFirst("ÉCHEC : ".count))
+            if alerts {
+                notifier.post("Problème détecté", detail.prefix(1).uppercased() + detail.dropFirst(),
+                              id: "failure-\(detail)", sound: true)
+            }
+        }
+    }
+
+    /// Tunnel tombé sans message dans le journal : signalé après une minute,
+    /// plus long qu'un changement de serveur normal
+    private func watchTunnel() {
+        guard installed, !busy, !failed else { downSince = nil; return }
+        if currentID != nil {
+            if downNotified, notifier.alerts {
+                notifier.post("VPN rétabli", "Connecté à \(currentName ?? "un serveur").", id: "state")
+            }
+            downSince = nil
+            downNotified = false
+            return
+        }
+        let now = Date()
+        guard let since = downSince else { downSince = now; return }
+        guard !downNotified, now.timeIntervalSince(since) > 60 else { return }
+        downNotified = true
+        guard notifier.alerts else { return }
+        notifier.post("VPN coupé",
+                      applied?.killSwitch ?? true
+                          ? "Le tunnel est tombé. Internet reste bloqué jusqu'au prochain serveur."
+                          : "Le tunnel est tombé : votre vraie adresse est visible jusqu'au prochain serveur.",
+                      id: "state", sound: true)
     }
 
     private func loadHistory(_ path: String) {
