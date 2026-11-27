@@ -1,0 +1,4 @@
+*.app/
+*.zip
+*.conf
+.DS_Store
