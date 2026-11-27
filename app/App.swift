@@ -824,6 +824,7 @@ struct SettingsPage: View {
     @StateObject private var confirmUninstall = Box(false)
     @AppStorage(Notifier.alertsKey) private var notifyAlerts = true
     @AppStorage(Notifier.changesKey) private var notifyChanges = false
+    @AppStorage(MenuBarSetting.key) private var menuBar = true
     private let presets = [5, 10, 15, 30, 60, 120]
 
     private var minutes: Binding<Int> {
@@ -838,6 +839,7 @@ struct SettingsPage: View {
                 order
                 killSwitch
                 notifications
+                menuBarCard
                 wireGuard
                 uninstall
             }
@@ -971,6 +973,23 @@ struct SettingsPage: View {
                     }
                 }
             }
+        }
+    }
+
+    private var menuBarCard: some View {
+        SettingsCard(symbol: "menubar.rectangle", color: .indigo, title: "Barre des menus",
+                     subtitle: "État du VPN et changement de serveur sans ouvrir la fenêtre.") {
+            Toggle(isOn: $menuBar) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Afficher dans la barre des menus")
+                    Text(menuBar
+                         ? "Fermer la fenêtre garde VPN Rotate ouverte, et ses notifications. Quittez-la depuis ce menu."
+                         : "Fermer la fenêtre quitte VPN Rotate. La rotation, elle, continue.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
         }
     }
 
@@ -1258,7 +1277,8 @@ struct Banners: View {
 }
 
 struct RootView: View {
-    @StateObject private var model = Model()
+    @ObservedObject var model: Model
+    @AppStorage(MenuBarSetting.key) private var menuBar = true
     @StateObject private var page = Box(Page.home)
     @StateObject private var importing = Box(false)
 
@@ -1289,6 +1309,9 @@ struct RootView: View {
             if case .success(let urls) = result { model.add(urls) }
         }
         .task { await model.fetchIP() }
+        // Fenêtre ouverte : icône dans le Dock. Fermée : seulement la barre des menus
+        .onAppear { NSApp.setActivationPolicy(.regular) }
+        .onDisappear { if menuBar { NSApp.setActivationPolicy(.accessory) } }
     }
 
     @ViewBuilder private var content: some View {
@@ -1317,9 +1340,20 @@ struct RootView: View {
 
 @main
 struct RotationApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+    /// Un seul modèle pour la fenêtre et la barre des menus : il vit tant que l'application tourne
+    @StateObject private var model = Model()
+    @AppStorage(MenuBarSetting.key) private var menuBar = true
+
     var body: some Scene {
-        Window("VPN Rotate", id: "main") { RootView() }
+        Window("VPN Rotate", id: "main") { RootView(model: model) }
             .windowResizability(.contentMinSize)
             .defaultSize(width: 980, height: 720)
+        MenuBarExtra(isInserted: $menuBar) {
+            MenuBarMenu(model: model)
+        } label: {
+            MenuBarLabel(model: model)
+        }
+        .menuBarExtraStyle(.menu)
     }
 }
