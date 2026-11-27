@@ -2,7 +2,8 @@
 # Actions privilégiées de VPN Rotation. Installé par install.sh dans un dossier
 # réservé à l'administrateur ; l'application le lance par sudo, sans mot de passe.
 # Tout ce qu'il reçoit vient donc d'un programme non privilégié : à contrôler.
-#   control.sh apply <dossier> <secondes> <sequential|random>
+#   control.sh apply <dossier> <secondes> <sequential|random> [on|off]
+#     (dernier argument : blocage hors VPN, activé par défaut)
 #   control.sh now [vpnNN]
 #   control.sh stop
 #   control.sh uninstall
@@ -123,9 +124,10 @@ sanitize_conf() {
 
 case "$1" in
   apply)
-    src="$2"; seconds="$3"; order="$4"
+    src="$2"; seconds="$3"; order="$4"; killswitch="${5:-on}"
     [[ "$seconds" =~ ^[1-9][0-9]{1,6}$ ]] && [ "$seconds" -ge 60 ] || die "Intervalle invalide."
     [ "$order" = sequential ] || [ "$order" = random ] || die "Ordre invalide."
+    [ "$killswitch" = on ] || [ "$killswitch" = off ] || die "Réglage de blocage invalide."
     command -v wg-quick >/dev/null || die "WireGuard manquant : réinstallez l'application."
 
     # Chaque fichier est réécrit dans un dossier protégé
@@ -146,14 +148,22 @@ case "$1" in
     done
     [ "$count" -ge 2 ] || { rm -rf "${new:?}"; die "Sélectionne au moins 2 serveurs."; }
 
+    mkdir -p "$(dirname "$LOG")"
     unload
     unload_stats
+    # Bloqué avant de couper l'ancien tunnel : rien ne sort jusqu'au suivant
+    if [ "$killswitch" = on ]; then
+      killswitch_on "" "$new" >> "$LOG" || true
+    else
+      killswitch_off >> "$LOG" || true
+    fi
     down_all
     rm -rf "${DIR:?}"
     mv "$new" "$DIR"
     echo "$order" > "$DIR/order"
+    echo "$killswitch" > "$DIR/killswitch"
 
-    mkdir -p "$SHARE" "$(dirname "$PLIST")" "$(dirname "$LOG")"
+    mkdir -p "$SHARE" "$(dirname "$PLIST")"
     chmod 755 "$SHARE"
     read_user "$src/names.tsv" | awk -F '\t' -v OFS='\t' \
       'NF == 2 && $1 ~ /^vpn[0-9][0-9]$/ { gsub(/[[:cntrl:]]/, "", $2); print $1, $2 }' \
@@ -211,6 +221,7 @@ EOF
     unload
     unload_stats
     down_all
+    killswitch_off >> "$LOG" || true
     # Sans le plist, la rotation ne repart pas au redémarrage
     rm -f "$PLIST" "$STATSPLIST"
     echo "$(date '+%F %T') rotation arrêtée" >> "$LOG"
@@ -221,6 +232,7 @@ EOF
     unload
     unload_stats
     down_all
+    killswitch_off >> "$LOG" || true
     # Retire d'abord l'autorisation sans mot de passe
     rm -f "$ROOT"/etc/sudoers.d/vpnrotate-*
     rm -rf "${DIR:?}"

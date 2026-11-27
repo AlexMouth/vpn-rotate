@@ -47,7 +47,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
   <key>CFBundleIdentifier</key><string>local.vpnrotate.app</string>
   <key>CFBundleExecutable</key><string>VPNRotation</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>2.1</string>
+  <key>CFBundleShortVersionString</key><string>2.2</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
 </dict>
 </plist>

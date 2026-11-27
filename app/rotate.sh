@@ -40,6 +40,13 @@ fi
 # Compte la fin de la session avant de couper
 record_stats || true
 
+# Rien ne sort en clair pendant le changement de serveur
+if killswitch_enabled; then
+  killswitch_on || true
+else
+  killswitch_off
+fi
+
 for conf in "${configs[@]}"; do
   if [ -f "$RUN/$(basename "$conf" .conf).name" ]; then
     wg-quick down "$conf"
@@ -91,11 +98,22 @@ for index in "${queue[@]}"; do
     chmod 644 "$SHARE/status"
     say "connecté : ${label:-$id}"
     block_ipv6
+    if killswitch_enabled; then
+      if [ -n "$iface" ]; then
+        killswitch_on "$iface" || true
+      else
+        say "ÉCHEC : interface du tunnel inconnue, trafic bloqué" >&2
+      fi
+    fi
     exit 0
   fi
   say "serveur injoignable : ${label:-$id}" >&2
   restore_dns
 done
 
-say "ÉCHEC : aucun serveur joignable, VPN coupé" >&2
+if killswitch_enabled; then
+  say "ÉCHEC : aucun serveur joignable, trafic bloqué jusqu'à l'arrêt de la rotation" >&2
+else
+  say "ÉCHEC : aucun serveur joignable, VPN coupé" >&2
+fi
 exit 1

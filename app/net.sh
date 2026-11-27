@@ -129,6 +129,95 @@ unblock_ipv6() {
   done
 }
 
+# Blocage hors VPN (kill switch) : règles du pare-feu pf de macOS, chargées
+# dans une ancre que /etc/pf.conf inclut déjà. Seuls passent le tunnel actif,
+# les serveurs WireGuard (pour monter le tunnel suivant) et le réseau local.
+# Non permanent : un redémarrage l'efface, la rotation le remet au démarrage.
+PF_ANCHOR="com.apple/250.VPNRotate"
+
+# Adresse et port UDP de chaque serveur, un par ligne : "adresse port".
+# Les noms sont résolus tout de suite, tant que le réseau est ouvert.
+endpoints() {
+  local files=("${1:-$DIR}"/*.conf) value host port
+  [ -e "${files[0]}" ] || return 0
+  awk -F= 'tolower($1) ~ /^[ \t]*endpoint[ \t]*$/ { v = $2; gsub(/[ \t\r]/, "", v); print v }' \
+    "${files[@]}" 2>/dev/null | sort -u |
+  while IFS= read -r value; do
+    case "$value" in
+      \[*\]:*) host=${value#\[}; host=${host%%\]*}; port=${value##*\]:} ;;
+      *:*) host=${value%:*}; port=${value##*:} ;;
+      *) continue ;;
+    esac
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] || continue
+    if [[ "$host" =~ ^[0-9.]+$ || "$host" =~ ^[0-9A-Fa-f:]+$ ]]; then
+      echo "$host $port"
+    elif [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]]; then
+      dscacheutil -q host -a name "$host" 2>/dev/null |
+        awk -v p="$port" '/^ip(v6)?_address:/ { print $2, p }'
+    fi
+  done | sort -u
+}
+
+# Règles pf ; lit les serveurs sur l'entrée. Sans interface : tout est coupé
+# sauf les serveurs et le réseau local (moment du changement de serveur).
+pf_rules() {
+  local iface="$1" ip port
+  echo "pass out quick on lo0 all"
+  if [ -n "$iface" ]; then echo "pass out quick on $iface all"; fi
+  while read -r ip port; do
+    if [ -n "$port" ]; then echo "pass out quick proto udp to $ip port $port"; fi
+  done
+  echo "pass out quick inet to { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 }"
+  echo "pass out quick inet proto udp from any port 68 to any port 67"
+  echo "pass out quick inet6 to { fe80::/10, ff00::/8 }"
+  echo "block return out quick all"
+}
+
+# Identifie le démarrage en cours : un jeton pf ne survit pas au redémarrage
+boot_id() {
+  sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9]*\).*/\1/p'
+}
+
+# killswitch_on [interface du tunnel] [dossier des .conf]
+killswitch_on() {
+  local iface="$1" dir="${2:-$DIR}" token="" saved="" boot
+  if [ -n "$iface" ] && ! [[ "$iface" =~ ^utun[0-9]+$ ]]; then
+    echo "$(date '+%F %T') ÉCHEC : interface du tunnel inattendue ($iface)"
+    iface=""
+  fi
+  if ! endpoints "$dir" | pf_rules "$iface" | pfctl -q -a "$PF_ANCHOR" -f - 2>/dev/null; then
+    echo "$(date '+%F %T') ÉCHEC : blocage hors VPN impossible (pfctl)"
+    return 1
+  fi
+  boot=$(boot_id)
+  { read -r token saved < "$H/pf-token"; } 2>/dev/null || true
+  # pf est activé une seule fois par démarrage ; le jeton permet de rendre
+  # la main sans couper pf s'il sert aussi à autre chose
+  if [ -z "$token" ] || [ "$saved" != "$boot" ] ||
+    ! pfctl -s info 2>/dev/null | grep -q '^Status: Enabled'; then
+    token=$(pfctl -E 2>&1 | awk '/^Token/ { print $NF }')
+    printf '%s %s\n' "$token" "$boot" > "$H/pf-token"
+    chmod 600 "$H/pf-token"
+    echo "$(date '+%F %T') blocage hors VPN activé"
+  fi
+}
+
+killswitch_off() {
+  local token="" saved=""
+  pfctl -q -a "$PF_ANCHOR" -F all 2>/dev/null || true
+  [ -f "$H/pf-token" ] || return 0
+  { read -r token saved < "$H/pf-token"; } 2>/dev/null || true
+  if [ -n "$token" ] && [ "$saved" = "$(boot_id)" ]; then
+    pfctl -q -X "$token" 2>/dev/null || true
+  fi
+  rm -f "$H/pf-token"
+  echo "$(date '+%F %T') blocage hors VPN retiré"
+}
+
+killswitch_enabled() {
+  [ "$(cat "$DIR/killswitch" 2>/dev/null)" = on ]
+}
+
 # État du réseau après l'arrêt, consigné dans le journal
 diagnostic() {
   local dns=OK ip=KO name=KO iface

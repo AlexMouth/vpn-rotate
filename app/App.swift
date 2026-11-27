@@ -834,6 +834,7 @@ struct SettingsPage: View {
             VStack(spacing: 16) {
                 frequency
                 order
+                killSwitch
                 wireGuard
                 uninstall
             }
@@ -913,6 +914,25 @@ struct SettingsPage: View {
                 Spacer(minLength: 0)
             }
             .padding(14)
+        }
+    }
+
+    private var killSwitch: some View {
+        let on = model.library.killSwitch
+        return SettingsCard(symbol: on ? "lock.shield.fill" : "lock.open.fill", color: on ? .green : .orange,
+                            title: "Blocage hors VPN",
+                            subtitle: "Coupe Internet quand le tunnel tombe ou pendant un changement de serveur : votre vraie adresse ne sort jamais. Le réseau local reste accessible.") {
+            Toggle(isOn: Binding(get: { model.library.killSwitch },
+                                 set: { model.library.killSwitch = $0 })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Bloquer le trafic hors du tunnel")
+                    Text(on ? "Si aucun serveur ne répond, Internet reste coupé jusqu'à « Arrêter »."
+                            : "Désactivé : votre vraie adresse peut apparaître quelques secondes à chaque rotation.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
         }
     }
 

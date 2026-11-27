@@ -5,6 +5,7 @@ Application macOS qui change automatiquement de serveur VPN (WireGuard, avec les
 - Import de vos fichiers `.conf` et choix des serveurs de la rotation
 - Carte du monde : position actuelle et circuit de la rotation
 - Débit en direct, statistiques par serveur et hors VPN
+- Blocage hors VPN (kill switch, pare-feu pf de macOS) : rien ne sort en clair pendant un changement de serveur ou si le tunnel tombe
 - Réglages et journal
 
 ## Télécharger

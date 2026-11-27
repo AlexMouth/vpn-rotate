@@ -24,6 +24,19 @@ struct Library: Codable, Equatable {
     var servers: [Server] = []
     var minutes = 30
     var random = false
+    /// Bloque le trafic hors du tunnel (pare-feu pf)
+    var killSwitch = true
+
+    init() {}
+
+    // Les réglages enregistrés avant l'ajout d'un champ restent lisibles
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        servers = try c.decodeIfPresent([Server].self, forKey: .servers) ?? []
+        minutes = try c.decodeIfPresent(Int.self, forKey: .minutes) ?? 30
+        random = try c.decodeIfPresent(Bool.self, forKey: .random) ?? false
+        killSwitch = try c.decodeIfPresent(Bool.self, forKey: .killSwitch) ?? true
+    }
 }
 
 struct IPInfo: Decodable, Equatable {
@@ -329,7 +342,8 @@ final class Model: ObservableObject {
             return
         }
         let snapshot = library
-        run(["apply", stage.path, String(snapshot.minutes * 60), snapshot.random ? "random" : "sequential"]) {
+        run(["apply", stage.path, String(snapshot.minutes * 60), snapshot.random ? "random" : "sequential",
+             snapshot.killSwitch ? "on" : "off"]) {
             self.applied = snapshot
             self.write(snapshot, to: "applied.json")
         } always: {
