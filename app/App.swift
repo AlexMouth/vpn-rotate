@@ -1413,7 +1413,8 @@ struct RootView: View {
 struct RotationApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     /// Un seul modèle pour la fenêtre et la barre des menus : il vit tant que l'application tourne
-    @StateObject private var model = Model()
+    @StateObject private var models = Models()
+    private var model: Model { models.model }
     @StateObject private var updater = Updater()
     @AppStorage(MenuBarSetting.key) private var menuBar = true
 
@@ -1436,7 +1437,7 @@ struct RotationApp: App {
         MenuBarExtra(isInserted: $menuBar) {
             MenuBarMenu(model: model, updater: updater)
         } label: {
-            MenuBarLabel(model: model)
+            MenuBarLabel(state: models.menuState)
         }
         .menuBarExtraStyle(.menu)
     }

@@ -99,39 +99,51 @@ struct Connection {
     }
 }
 
-/// Compteurs d'octets d'une interface, ou de toutes les interfaces "en*"
-func byteCounters(_ interface: String?) -> [String: (UInt32, UInt32)] {
-    var result: [String: (UInt32, UInt32)] = [:]
-    var list: UnsafeMutablePointer<ifaddrs>?
-    guard getifaddrs(&list) == 0 else { return result }
-    defer { freeifaddrs(list) }
-    var current = list
-    while let entry = current {
-        defer { current = entry.pointee.ifa_next }
-        guard let address = entry.pointee.ifa_addr,
-              address.pointee.sa_family == UInt8(AF_LINK),
-              let data = entry.pointee.ifa_data else { continue }
-        let name = String(cString: entry.pointee.ifa_name)
-        if let interface { if name != interface { continue } }
-        else if !name.hasPrefix("en") { continue }
-        let stats = data.assumingMemoryBound(to: if_data.self).pointee
-        result[name] = (stats.ifi_ibytes, stats.ifi_obytes)
+/// Compteurs d'octets (64 bits) des cartes réseau "en*". Les compteurs 32 bits de
+/// getifaddrs repartent de zéro tous les 4 Go et obligeaient à relever chaque seconde.
+func byteCounters() -> [String: (UInt64, UInt64)] {
+    var result: [String: (UInt64, UInt64)] = [:]
+    var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0]
+    var length = 0
+    guard sysctl(&mib, 6, nil, &length, nil, 0) == 0, length > 0 else { return result }
+    // Marge si une interface apparaît entre les deux appels
+    length += 512
+    var buffer = [UInt8](repeating: 0, count: length)
+    guard sysctl(&mib, 6, &buffer, &length, nil, 0) == 0 else { return result }
+    buffer.withUnsafeBytes { raw in
+        let header = MemoryLayout<if_msghdr2>.size
+        var offset = 0
+        while offset + MemoryLayout<if_msghdr>.size <= length {
+            let message = raw.loadUnaligned(fromByteOffset: offset, as: if_msghdr.self)
+            let size = Int(message.ifm_msglen)
+            guard size > 0 else { break }
+            defer { offset += size }
+            guard Int32(message.ifm_type) == RTM_IFINFO2,
+                  offset + header + MemoryLayout<sockaddr_dl>.size <= length else { continue }
+            let info = raw.loadUnaligned(fromByteOffset: offset, as: if_msghdr2.self)
+            // Le nom de l'interface suit l'en-tête, dans l'adresse de lien
+            let link = raw.loadUnaligned(fromByteOffset: offset + header, as: sockaddr_dl.self)
+            let start = offset + header + MemoryLayout.offset(of: \sockaddr_dl.sdl_data)!
+            guard start + Int(link.sdl_nlen) <= length else { continue }
+            let name = String(decoding: raw[start..<start + Int(link.sdl_nlen)], as: UTF8.self)
+            guard name.hasPrefix("en") else { continue }
+            result[name] = (info.ifm_data.ifi_ibytes, info.ifm_data.ifi_obytes)
+        }
     }
     return result
 }
 
 /// Octets passés entre deux lectures des compteurs
-func traffic(from old: [String: (UInt32, UInt32)], to new: [String: (UInt32, UInt32)],
+func traffic(from old: [String: (UInt64, UInt64)], to new: [String: (UInt64, UInt64)],
              seconds: TimeInterval) -> (UInt64, UInt64) {
-    // Un écart impossible signale un compteur reparti de zéro
-    let limit = min(Double(1 << 31), max(seconds, 1) * 1.5e9)
+    // Au-delà de 12 Gbit/s, l'écart vient d'une interface recréée, pas du trafic
+    let limit = max(seconds, 1) * 1.5e9
     var received: UInt64 = 0, sent: UInt64 = 0
     for (name, value) in new {
         guard let before = old[name] else { continue }
-        // &- absorbe le retour à zéro des compteurs 32 bits
-        let down = value.0 &- before.0, up = value.1 &- before.1
-        if Double(down) < limit { received += UInt64(down) }
-        if Double(up) < limit { sent += UInt64(up) }
+        // Un compteur qui recule : interface recréée, rien à compter
+        if value.0 >= before.0, Double(value.0 - before.0) < limit { received += value.0 - before.0 }
+        if value.1 >= before.1, Double(value.1 - before.1) < limit { sent += value.1 - before.1 }
     }
     return (received, sent)
 }
@@ -157,17 +169,26 @@ private struct FileStamp: Equatable {
 final class Live: ObservableObject {
     private(set) var samples: [Sample] = []
     private(set) var connection: Connection?
-    /// Fenêtre cachée : les mesures continuent, sans rien redessiner
+    /// Fenêtre cachée : les mesures continuent, plus espacées, sans rien redessiner
     var visible = true {
-        didSet { if visible, !oldValue { objectWillChange.send() } }
+        didSet {
+            guard visible != oldValue else { return }
+            // Le graphique repart de zéro : des points pris toutes les 30 s n'y ont pas leur place
+            if visible { objectWillChange.send() } else { samples = [] }
+        }
     }
 
     /// `oldest` : les relevés jusqu'à ce numéro sortent de la fenêtre affichée
     func record(_ sample: Sample?, oldest: Int, connection: Connection?) {
-        if visible { objectWillChange.send() }
+        let count = samples.count
         if let sample { samples.append(sample) }
         samples.removeAll { $0.id <= oldest }
+        let changed = sample != nil || samples.count != count
+            || connection?.start != self.connection?.start
+            || connection?.received != self.connection?.received || connection?.sent != self.connection?.sent
         self.connection = connection
+        // Rien de neuf : rien à redessiner
+        if visible, changed { objectWillChange.send() }
     }
 }
 
@@ -220,11 +241,17 @@ final class Model: ObservableObject {
     private var downNotified = false
 
     private let folder: URL
-    private var previous: (time: Date, interface: String?, bytes: [String: (UInt32, UInt32)])?
+    private var previous: (time: Date, interface: String?, bytes: [String: (UInt64, UInt64)])?
     private var tickCount = 0
-    /// Empêche App Nap de ralentir la mesure quand la fenêtre est masquée
-    private var activity: NSObjectProtocol?
     private var timer: Timer?
+    private var lastRefresh = Date.distantPast
+    private var lastSave = Date()
+    private var lastIPFetch = Date.distantPast
+    /// Requête d'adresse en cours, pour ne pas en lancer deux pour le même serveur
+    private var fetchingIP: String?
+    /// Surveillance des fichiers écrits par les scripts, à la place d'une relecture régulière
+    private var watchers: [String: DispatchSourceFileSystemObject] = [:]
+    private var pendingReload: DispatchWorkItem?
     private var stamps: [String: FileStamp] = [:]
     private var scriptsMatch = false
     private var statsMatch = false
@@ -254,11 +281,29 @@ final class Model: ObservableObject {
                                                object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.saveOffline() }
         }
-        NotificationCenter.default.addObserver(forName: NSApplication.didChangeOcclusionStateNotification,
-                                               object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.live.visible = NSApp.occlusionState.contains(.visible) }
+        // Fenêtre affichée ou non : le rythme de la mesure en dépend
+        for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.willCloseNotification,
+                     NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
+                     NSApplication.didChangeOcclusionStateNotification] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                // Après coup : une fenêtre qui se ferme est encore visible pendant la notification
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.updateVisibility() } }
+            }
+        }
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            // Le temps passé en veille n'est pas du temps hors VPN
+            MainActor.assumeIsolated {
+                self?.previous?.time = Date()
+                self?.reload()
+            }
         }
         refresh()
+        lastRefresh = Date()
+        watchFiles()
         startTicking()
         if notifier.alerts || notifier.changes { enableNotifications() }
     }
@@ -512,7 +557,7 @@ final class Model: ObservableObject {
             iface = status[1].isEmpty ? nil : status[1]
             date = Date(timeIntervalSince1970: epoch)
             // Après un redémarrage, le fichier d'état peut rester alors que le tunnel n'existe plus
-            if let name = iface, byteCounters(name).isEmpty { id = nil; iface = nil; date = nil }
+            if let name = iface, if_nametoindex(name) == 0 { id = nil; iface = nil; date = nil }
         }
         assign(\.currentID, id)
         assign(\.interface, iface)
@@ -643,47 +688,119 @@ final class Model: ObservableObject {
         }
     }
 
-    /// La mesure ne dépend pas de la fenêtre : elle continue derrière un navigateur
+    /// Une seconde fenêtre affichée (graphique), 30 s sinon : les compteurs 64 bits
+    /// ne repartent pas de zéro entre deux relevés, rien n'est perdu
+    private var tickInterval: TimeInterval { live.visible ? 1 : 30 }
+
+    /// La mesure ne dépend pas de la fenêtre : elle continue, plus espacée, quand elle est fermée
     private func startTicking() {
-        activity = ProcessInfo.processInfo.beginActivity(
-            options: .userInitiatedAllowingIdleSystemSleep, reason: "Mesure du débit en direct")
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+        timer?.invalidate()
+        let interval = tickInterval
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
         // Laisse macOS regrouper les réveils du processeur
-        timer.tolerance = 0.2
+        timer.tolerance = interval < 2 ? 0.2 : 5
         // .common : continue aussi pendant l'ouverture d'un menu ou un défilement
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
     }
 
-    /// Appelé chaque seconde
+    /// Une fenêtre principale à l'écran, pas seulement l'icône de la barre des menus
+    private func updateVisibility() {
+        let visible = NSApp.windows.contains {
+            $0.isVisible && !$0.isMiniaturized && $0.canBecomeMain && $0.occlusionState.contains(.visible)
+        }
+        guard visible != live.visible else { return }
+        // Relevé immédiat avec l'ancien rythme, puis le nouveau
+        tick()
+        live.visible = visible
+        startTicking()
+    }
+
     private func tick() {
         tickCount += 1
-        if tickCount % 3 == 0 {
-            let before = lastChange
-            refresh()
-            if before != lastChange { Task { await fetchIP() } }
-        }
-        if tickCount % 60 == 0 { Task { await fetchIP() } }
-
         let now = Date()
+        // Contrôle de secours : les fichiers sont surveillés, mais un dossier peut apparaître ou disparaître
+        if now.timeIntervalSince(lastRefresh) >= 29 {
+            reload()
+            watchFiles()
+        }
+        if now.timeIntervalSince(lastIPFetch) >= 900 { Task { await fetchIP() } }
+
         // Toujours les cartes réseau : macOS compte presque en double ce qui est reçu sur utun
-        let bytes = byteCounters(nil)
+        let bytes = byteCounters()
         var moved: (UInt64, UInt64) = (0, 0)
         var sample: Sample?
         if let previous, previous.interface == interface {
             let seconds = now.timeIntervalSince(previous.time)
             moved = traffic(from: previous.bytes, to: bytes, seconds: seconds)
             if interface == nil, !bytes.isEmpty { recordOffline(moved, seconds: seconds, at: now) }
-            if seconds > 0 {
+            // Le graphique n'affiche que des points pris à une seconde d'écart
+            if live.visible, seconds > 0, seconds <= 2 {
                 sample = Sample(id: tickCount, down: Double(moved.0) / seconds, up: Double(moved.1) / seconds)
             }
         }
         previous = (now, interface, bytes)
         // Seuls les points des 60 secondes affichées sont gardés, même s'il en manque
         live.record(sample, oldest: tickCount - 60, connection: trackConnection(moved))
-        if tickCount % 30 == 0 { saveOffline() }
+        if now.timeIntervalSince(lastSave) >= 29 {
+            lastSave = now
+            saveOffline()
+        }
+    }
+
+    /// Relit l'état ; un changement de serveur demande la nouvelle adresse
+    private func reload() {
+        let before = lastChange
+        refresh()
+        lastRefresh = Date()
+        if before != lastChange { Task { await fetchIP() } }
+    }
+
+    /// Surveille le dossier partagé (fichiers remplacés ou recréés), le journal et les
+    /// programmes installés. Appelé à nouveau par le contrôle de secours : un dossier
+    /// créé à l'installation ou un journal recréé est alors pris en compte.
+    private func watchFiles() {
+        let paths = [sharePath, logPath, helperPath]
+        for (path, source) in watchers where !paths.contains(path) {
+            source.cancel()
+            watchers[path] = nil
+        }
+        for path in paths where watchers[path] == nil {
+            let fd = open(path, O_EVTONLY)
+            guard fd >= 0 else { continue }
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fd, eventMask: [.write, .extend, .delete, .rename], queue: .main)
+            source.setEventHandler { [weak self, weak source] in
+                MainActor.assumeIsolated {
+                    guard let self, let source else { return }
+                    // Fichier ou dossier supprimé ou déplacé : à surveiller de nouveau
+                    if !source.data.isDisjoint(with: [.delete, .rename]) {
+                        source.cancel()
+                        if self.watchers[path] === source { self.watchers[path] = nil }
+                    }
+                    self.scheduleReload()
+                }
+            }
+            source.setCancelHandler { close(fd) }
+            source.resume()
+            watchers[path] = source
+        }
+    }
+
+    /// Regroupe les événements d'une même écriture (un script modifie plusieurs fichiers)
+    private func scheduleReload() {
+        pendingReload?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.reload()
+                self.watchFiles()
+            }
+        }
+        pendingReload = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     // MARK: Hors VPN
@@ -691,8 +808,8 @@ final class Model: ObservableObject {
     /// Ajoute à l'heure en cours ce qui est passé par les interfaces réseau depuis le dernier relevé
     private func recordOffline(_ moved: (UInt64, UInt64), seconds: TimeInterval, at now: Date) {
         guard seconds > 0 else { return }
-        // Après une veille du Mac, le temps endormi n'est pas compté
-        let time = seconds < 10 ? seconds : 1
+        // La veille est retirée au réveil ; un écart anormal restant (processus suspendu) n'est pas compté
+        let time = seconds <= 600 ? seconds : tickInterval
         let epoch = now.timeIntervalSince1970
         let hour = Date(timeIntervalSince1970: epoch - epoch.truncatingRemainder(dividingBy: 3600))
         Self.merge(HistoryEntry(hour: hour, server: offlineID, seconds: time,
@@ -768,13 +885,19 @@ final class Model: ObservableObject {
     }
 
     func fetchIP() async {
+        let server = currentID, change = lastChange, wasInstalled = installed
+        // Même serveur qu'une requête en cours : sa réponse suffira
+        let key = "\(server ?? "")|\(change?.timeIntervalSince1970 ?? 0)"
+        guard fetchingIP != key else { return }
+        fetchingIP = key
+        defer { if fetchingIP == key { fetchingIP = nil } }
+        lastIPFetch = Date()
         var request = URLRequest(url: URL(string: "https://ipinfo.io/json")!)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 8
         // Session neuve : pas de connexion réutilisée d'avant le changement
         let session = URLSession(configuration: .ephemeral)
         defer { session.finishTasksAndInvalidate() }
-        let server = currentID, change = lastChange, wasInstalled = installed
         do {
             let (data, _) = try await session.data(for: request)
             let info = try JSONDecoder().decode(IPInfo.self, from: data)

@@ -8,12 +8,34 @@ enum MenuBarSetting {
 
 /// Icône de la barre des menus : l'état du VPN d'un coup d'œil
 struct MenuBarLabel: View {
-    @ObservedObject var model: Model
+    @ObservedObject var state: Box<VPNState>
 
     var body: some View {
         // Image modèle (monochrome) : macOS l'adapte au fond de la barre
-        Image(systemName: model.state.symbol)
-            .accessibilityLabel("VPN Rotate : \(model.state.title)")
+        Image(systemName: state.value.symbol)
+            .accessibilityLabel("VPN Rotate : \(state.value.title)")
+    }
+}
+
+/// Garde le modèle sans suivre ses changements : chaque vue observe ce qu'elle affiche.
+/// L'icône de la barre des menus ne se redessine ainsi que si l'état change.
+@MainActor
+final class Models: ObservableObject {
+    let model = Model()
+    let menuState: Box<VPNState>
+    private var watch: Any?
+
+    init() {
+        menuState = Box(model.state)
+        watch = model.objectWillChange.sink { [weak self] _ in
+            // Après coup : objectWillChange part avant la modification
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.menuState.value != self.model.state else { return }
+                    self.menuState.value = self.model.state
+                }
+            }
+        }
     }
 }
 
